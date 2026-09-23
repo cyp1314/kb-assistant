@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>企业智能客服 · 小北</title>
+<style>
+  :root { --bg:#0f1216; --panel:#171c22; --line:#2a323c; --text:#e6e9ed;
+          --me:#3b82f6; --bot:#232b35; --warn:#b45309; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.6 system-ui,"PingFang SC","Microsoft YaHei"; background:var(--bg); color:var(--text); }
+  #app { max-width:760px; margin:0 auto; height:100vh; display:flex; flex-direction:column; }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); font-weight:600; }
+  header small { color:#8b98a5; font-weight:400; margin-left:8px; }
+  #log { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:82%; padding:10px 14px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
+  .user { align-self:flex-end; background:var(--me); color:#fff; border-bottom-right-radius:3px; }
+  .bot  { align-self:flex-start; background:var(--bot); border-bottom-left-radius:3px; }
+  .tool { align-self:flex-start; background:transparent; color:#64748b; font-size:12px; padding:2px 14px; }
+  .card { align-self:flex-start; width:92%; background:#1c1410; border:1px solid var(--warn);
+          border-radius:12px; padding:14px; }
+  .card h4 { margin:0 0 6px; color:#f59e0b; font-size:14px; }
+  .card p { margin:4px 0; font-size:13px; color:#d6c8b8; }
+  .card input { width:100%; margin-top:8px; padding:8px 10px; border-radius:8px;
+                border:1px solid var(--line); background:var(--panel); color:var(--text); }
+  .card button { margin-top:8px; margin-right:8px; padding:7px 16px; border:0; border-radius:8px;
+                 background:var(--warn); color:#fff; cursor:pointer; }
+  #bar { display:flex; gap:10px; padding:14px 18px; border-top:1px solid var(--line); }
+  #input { flex:1; padding:11px 14px; border-radius:10px; border:1px solid var(--line);
+           background:var(--panel); color:var(--text); font:inherit; }
+  #send { padding:0 22px; border:0; border-radius:10px; background:var(--me); color:#fff;
+          cursor:pointer; font:inherit; }
+  #send:disabled { opacity:.5; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>企业智能客服 · 小北<small>制度咨询 / 产品售后 / 工单 · 支持转人工</small></header>
+  <div id="log"></div>
+  <div id="bar">
+    <input id="input" placeholder="例如：一线城市住宿标准？ 或 查工单TK-1001" autocomplete="off">
+    <button id="send">发送</button>
+  </div>
+</div>
+
+<script>
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+const THREAD = localStorage.getItem('kb_thread') ||
+  (() => { const t = 'web-' + crypto.randomUUID().slice(0,8);
+           localStorage.setItem('kb_thread', t); return t; })();
+
+const el = (cls, html) => { const d = document.createElement('div');
+  d.className = cls; if (html !== undefined) d.innerHTML = html; log.append(d); log.scrollTop = 1e9; return d; };
+
+async function callApi(url, body) {
+  const res = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'},
+                                 body: JSON.stringify(body) });
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', botEl = null;
+  send.disabled = true;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream:true });
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const ev = JSON.parse(line.slice(6));
+      if (ev.type === 'token') {
+        if (!botEl) botEl = el('msg bot');
+        botEl.textContent += ev.text;
+      } else if (ev.type === 'tool') {
+        el('tool', '⚙ 工具返回: ' + ev.text.replace(/</g,'&lt;'));
+      } else if (ev.type === 'interrupt') {
+        showApproval(ev.payload); botEl = null;
+      } else if (ev.type === 'done' && ev.waiting) {
+        send.disabled = true;   // 停在人审，输入禁用
+      }
+    }
+    log.scrollTop = 1e9;
+  }
+  send.disabled = false;
+}
+
+function showApproval(p) {
+  const card = el('card');
+  card.innerHTML = `<h4>⏸ 已转人工 —— 等待客服答复</h4>
+    <p>用户问题：${p.question ?? ''}</p>
+    <p>转接原因：${p.reason ?? ''}</p>
+    <input id="reply" placeholder="以人工客服身份输入答复，将作为工具结果继续对话">
+    <br><button id="ok">发送人工答复</button>`;
+  card.querySelector('#ok').onclick = async () => {
+    const reply = card.querySelector('#reply').value.trim();
+    if (!reply) return;
+    card.remove();
+    el('msg tool', '🧑‍💼 人工客服: ' + reply);
+    await callApi('/api/resume', { thread_id: THREAD, reply });
+  };
+}
+
+async function sendMsg() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  el('msg user', text.replace(/</g,'&lt;'));
+  await callApi('/api/chat', { thread_id: THREAD, message: text });
+}
+send.onclick = sendMsg;
+input.onkeydown = e => { if (e.key === 'Enter') sendMsg(); };
+
+// 页面刷新后恢复"停在人审"的状态
+fetch('/api/pending?thread_id=' + THREAD).then(r => r.json()).then(s => {
+  if (s.waiting) { showApproval(s.payload); send.disabled = true; }
+});
+</script>
+</body>
+</html>
