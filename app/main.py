@@ -6,6 +6,9 @@
   POST /api/resume       {thread_id, reply}        -> 人工答复注入挂起的 interrupt，继续 SSE 流
   GET  /api/pending      ?thread_id=xxx            -> 该会话是否停在人审等待（页面刷新恢复用）
   POST /api/reindex      重建向量索引
+  GET  /api/docs         列出索引中已有的文档（source → chunk 数）
+  POST /api/docs/add     {path: "data/docs/xxx.md"}  增量添加单个 .md 文件
+  POST /api/docs/delete  {source: "xxx.md"}          从索引中删除某文档
 """
 import json
 from functools import lru_cache
@@ -81,6 +84,14 @@ class ResumeIn(BaseModel):
     reply: str
 
 
+class DocPathIn(BaseModel):
+    path: str
+
+
+class DocSourceIn(BaseModel):
+    source: str
+
+
 @app.post("/api/chat")
 def chat(body: ChatIn):
     if not body.message.strip():
@@ -112,6 +123,33 @@ def pending(thread_id: str):
 @app.post("/api/reindex")
 def reindex():
     n = rag.build_index()
+    # agent 单例持有旧的 Chroma 客户端，清空让下次请求重建
+    agent.cache_clear()
+    return {"chunks": n}
+
+
+@app.get("/api/docs")
+def list_docs():
+    return rag.list_documents()
+
+
+@app.post("/api/docs/add")
+def add_doc(body: DocPathIn):
+    try:
+        n = rag.add_document(body.path)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # 清缓存让 retriever 重新打开 Chroma，拿到新数据
+    agent.cache_clear()
+    return {"chunks": n}
+
+
+@app.post("/api/docs/delete")
+def delete_doc(body: DocSourceIn):
+    n = rag.delete_document(body.source)
+    agent.cache_clear()
     return {"chunks": n}
 
 
